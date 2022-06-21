@@ -3,6 +3,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 import unittest
 import torch
 from torch.utils._pytree import tree_map
+import torch._decomp
+from torch._meta_registrations import register_meta, meta_funcs
 aten = torch.ops.aten
 
 try:
@@ -13,21 +15,11 @@ except ImportError:
 skipIfNoSympy = unittest.skipIf(not HAS_SYMPY, "no sympy")
 
 
-meta_funcs = {}
-
-
-def register_meta(op):
-    def decorator(f):
-        def add_func(op):
-            meta_funcs[op] = f
-        tree_map(add_func, op)
-        return f
-    return decorator
 
 
 @register_meta([aten.add.Tensor, aten.sub.Tensor])
 def binary_meta(a, b):
-    return a.new_empty(a.sym_size())
+    return a.new_empty(a.size())
 
 
 @register_meta(aten.cat.default)
@@ -48,7 +40,7 @@ def cat_meta(tensors, dim=0):
 @register_meta([aten.narrow_copy.SymInt])
 def narrow_copy_symint_meta(a, dim, start, length, **kwargs):
     shape = []
-    for i, x in enumerate(a.sym_size()):
+    for i, x in enumerate(a.size()):
         if i == dim:
             shape.append(length)
         else:
@@ -73,6 +65,7 @@ class PySymInt(object):
         return f"PySymInt({self.expr})"
 
     def __int__(self):
+        import pdb; pdb.set_trace()
         return self.shape_env.evaluate_expr(self.expr)
 
     def __bool__(self):
@@ -151,6 +144,7 @@ class FakeSymbolicTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func_overload, types, args=(), kwargs=None):
+        breakpoint()
         if func_overload in meta_funcs:
             return meta_funcs[func_overload](*args, **kwargs)
 
@@ -163,14 +157,25 @@ class FakeSymbolicTensor(torch.Tensor):
 
 
 def create_symbolic_tensor(name, arg, shape_env):
-    sym_shapes = tuple([shape_env.create_symint(f"{name}_{idx}", val) for idx, val in enumerate(arg.sym_size())])
+    sym_shapes = tuple([shape_env.create_symint(f"{name}_{idx}", val) for idx, val in enumerate(arg.size())])
     sym_strides = tuple([shape_env.create_symint(f"{name}_{idx}_stride", val) for idx, val in enumerate(arg.stride())])
     return FakeSymbolicTensor(sym_shapes, sym_strides, arg.dtype, arg.layout, arg.requires_grad, arg.device)
 
 from torch._subclasses import FakeTensor
 from torch._subclasses.fake_tensor import FakeTensorMode
-shape_env = ShapeEnv()
+from torch.fx.experimental.proxy_tensor import make_fx
+
+def f(x):
+    return x + 2
+
+print(make_fx(f)(torch.randn(5, 5)))
+exit(0)
+
 foo = torch.empty(shape_env.create_symint("foo", 3), device='meta')
-# import pdb; pdb.set_trace()
-test = FakeTensor(FakeTensorMode(), foo, 'cuda')
-print((test.cos()).shape)
+fake_tensor_mode = FakeTensorMode()
+test = FakeTensor(fake_tensor_mode, foo, 'cuda')
+with fake_tensor_mode:
+    print(torch.ops.aten.expand.SymInt(test, [test.shape[0], test.shape[0]]))
+    # print(torch.empty(test.shape, device='meta'))
+    # print(torch.cat([test, test]).shape)
+print(shape_env.guards)
